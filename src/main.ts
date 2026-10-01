@@ -42,7 +42,16 @@ interface Session {
   wonAt: number | null;
   preset: string;
   core: ArchetypeId;
+  best: boolean;
 }
+
+/** Seconds the simulation waits so the room can assemble before it moves. */
+const ENTER_HOLD = 0.5;
+const RESPAWN_HOLD = 0.22;
+const WIN_TO_RESULTS_MS = 1050;
+const FAIL_TO_RESTART_MS = 820;
+const MEDAL_LEAD_MS = 380;
+const MEDAL_STEP_MS = 260;
 
 const query = new URLSearchParams(location.search);
 const debug = query.get("debug") === "1";
@@ -68,6 +77,9 @@ let preview: { x: number; y: number; lost: boolean }[] = [];
 let previewHold = 0;
 let acc = 0;
 let last = performance.now();
+/** Simulation hold in seconds: room entry, respawn beat, and hit-stop. */
+let hold = 0;
+let medalTimers: number[] = [];
 
 const shell = new Shell(root, {
   act: (action, arg) => onAct(action, arg),
@@ -141,7 +153,7 @@ function showWorld(id: number): void {
   screen = "world";
   session = null;
   const ids = clearedIds();
-  shell.world({
+  const model = {
     wing: info.wing,
     name: info.name,
     summary: info.summary,
@@ -150,9 +162,14 @@ function showWorld(id: number): void {
       index: index + 1,
       name: level.name,
       unlocked: levelUnlocked(level, ids, CAMPAIGN) || level.id === jump,
+      cleared: ids.includes(level.id),
+      next: false,
       pips: pipsFor(level),
     })),
-  });
+  };
+  const next = model.levels.find((level) => level.unlocked && !level.cleared);
+  if (next) next.next = true;
+  shell.world(model);
 }
 
 function showIntro(id: number): void {
@@ -240,13 +257,17 @@ function begin(
     wonAt: null,
     preset,
     core,
+    best: false,
   };
   const stat = statFor(save, level.id);
   stat.attempts += 1;
   save.stats[level.id] = stat;
   writeSave(save);
   preview = [];
-  view.clearTrail();
+  view.enter(authored, save.settings.reducedMotion);
+  hold = save.settings.reducedMotion ? 0 : ENTER_HOLD;
+  acc = 0;
+  cancelMedals();
   screen = "play";
   shell.play(hud());
   shell.say(`${level.name}. Polarity ${authored.ball.polarity === 1 ? "north" : "south"}.`);
@@ -284,8 +305,10 @@ function hud(): HudModel {
     polarity: state.ball.polarity,
     read,
     slots: objectiveSlots(level).map((slot) => ({
+      id: slot.id,
       label: slot.label,
       met: liveMet(level, state, slot.id),
+      live: liveTally(level, state, slot.id),
     })),
     hint: showHint ? (level.hint ?? null) : null,
     coach: level.id === "1-2" && !save.taughtFlip,
@@ -296,6 +319,16 @@ function hud(): HudModel {
     preset: current.preset,
     core: current.core,
   };
+}
+
+function liveTally(level: LevelDef, state: SimState, id: string): string | null {
+  const o = level.objectives ?? {};
+  if (id === "switches" && o.maxSwitches != null) {
+    return o.maxSwitches === 0 ? "No flips" : `${state.switches} / ${o.maxSwitches} flips`;
+  }
+  if (id === "shards") return `${state.got.filter(Boolean).length} / ${state.got.length}`;
+  if (id === "time" && o.maxTime != null) return `${state.time.toFixed(1)} / ${o.maxTime}s`;
+  return null;
 }
 
 function liveMet(level: LevelDef, state: SimState, id: string): boolean {
@@ -345,6 +378,7 @@ function restart(): void {
     wonAt: null,
     preset,
     core,
+    best: false,
   };
   const stat = statFor(save, level.id);
   stat.restarts += 1;
@@ -352,7 +386,10 @@ function restart(): void {
   save.stats[level.id] = stat;
   writeSave(save);
   preview = [];
-  view.clearTrail();
+  view.respawn(save.settings.reducedMotion);
+  hold = save.settings.reducedMotion ? 0 : RESPAWN_HOLD;
+  acc = 0;
+  cancelMedals();
   screen = "play";
   shell.clearOverlay();
   shell.play(hud());
@@ -369,7 +406,10 @@ function watch(): void {
   session.saved = true;
   session.wonAt = null;
   preview = [];
-  view.clearTrail();
+  view.respawn(save.settings.reducedMotion);
+  hold = save.settings.reducedMotion ? 0 : RESPAWN_HOLD;
+  acc = 0;
+  cancelMedals();
   screen = "play";
   shell.clearOverlay();
   shell.play(hud());
@@ -409,7 +449,9 @@ function finish(now: number): void {
     const key = dayKey();
     if (!save.dailies.includes(key)) save.dailies.push(key);
   }
-  save.cleared[level.id] = mergeClear(save.cleared[level.id], record);
+  const prev = save.cleared[level.id];
+  session.best = prev?.exit === true && record.time < prev.time - 0.05;
+  save.cleared[level.id] = mergeClear(prev, record);
   const stat = statFor(save, level.id);
   stat.wins += 1;
   save.stats[level.id] = stat;
@@ -426,7 +468,7 @@ function finish(now: number): void {
 function fail(now: number): void {
   if (!session || session.recovering || session.state.status !== "lost") return;
   session.recovering = true;
-  session.recoverAt = now + 560;
+  session.recoverAt = now + FAIL_TO_RESTART_MS;
   const reason = session.state.failReason ?? "void";
   session.mark = {
     x: session.state.ball.x,
@@ -463,14 +505,36 @@ function showResults(): void {
   const peers = worldLevels(level.world);
   const index = peers.findIndex((item) => item.id === level.id);
   const next = session.origin === "campaign" ? peers[index + 1] : undefined;
+  const slots = grade.slots.map((slot) => ({ label: slot.label, met: grade.met[slot.id] }));
   shell.results({
     title: level.name,
     success: level.success ?? null,
-    slots: grade.slots.map((slot) => ({ label: slot.label, met: grade.met[slot.id] })),
-    detail: `${state.switches} flips · ${state.time.toFixed(1)}s`,
+    slots,
+    switches: state.switches,
+    time: state.time,
     chain: state.bestChain,
     next: Boolean(next),
+    best: session.best,
+    step: MEDAL_STEP_MS,
+    lead: MEDAL_LEAD_MS,
   });
+  cancelMedals();
+  let lit = 0;
+  slots.forEach((slot, i) => {
+    if (!slot.met) return;
+    const n = lit++;
+    medalTimers.push(
+      window.setTimeout(() => {
+        sound.stamp(n);
+        haptic(10, save.settings.haptics);
+      }, MEDAL_LEAD_MS + i * MEDAL_STEP_MS + 120),
+    );
+  });
+}
+
+function cancelMedals(): void {
+  for (const id of medalTimers) window.clearTimeout(id);
+  medalTimers = [];
 }
 
 function onAct(action: string, arg: string): void {
@@ -562,7 +626,7 @@ function tick(now: number): void {
       demoCommands.push({ frame: demo.frame, polarity: next });
     }
     step(DEMO, demo, { ...DEFAULT_PARAMS, sandbox: true }, demoCommands);
-    view.ingest(demo.events, save.settings);
+    view.ingest(demo.events, save.settings, DEMO, demo);
     sound.hum(Math.hypot(demo.fx, demo.fy));
     if (demo.time > 14) {
       demo = createState(DEMO, { ...DEFAULT_PARAMS, sandbox: true });
@@ -572,12 +636,18 @@ function tick(now: number): void {
   }
   if (!session || screen === "pause" || screen === "results" || screen === "settings") return;
   if (session.recovering) return;
+  // A finished run keeps its last events; replaying them would repeat the win burst.
+  if (session.state.status !== "play") return;
   const using = session.kind === "replay" ? session.tape : session.commands;
   step(session.level, session.state, session.params, using);
-  view.ingest(session.state.events, save.settings);
+  view.ingest(session.state.events, save.settings, session.level, session.state);
   sound.hum(Math.hypot(session.state.fx, session.state.fy));
   for (const event of session.state.events) {
-    if (event.type === "bounce") sound.bounced(event.speed);
+    if (event.type === "bounce") {
+      sound.bounced(event.speed);
+      // Hit-stop: a hard strike freezes the room for a few frames.
+      if (event.speed > 7.5 && !save.settings.reducedMotion) hold = Math.max(hold, 0.035 + Math.min(0.03, (event.speed - 7.5) * 0.006));
+    }
     else if (event.type === "switch" && session.kind === "replay") sound.switched(event.polarity);
     else if (event.type === "field") sound.entered(event.attract);
     else if (event.type === "collect") sound.collected();
@@ -592,7 +662,10 @@ function tick(now: number): void {
 function frame(now: number): void {
   const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
-  if (!document.hidden) {
+  const playing = session && screen === "play";
+  if (playing && hold > 0) {
+    hold -= dt;
+  } else if (!document.hidden) {
     acc += dt;
     let guard = 0;
     while (acc >= DT && guard < 6) {
@@ -606,7 +679,7 @@ function frame(now: number): void {
     if (session.mark.life <= 0) session.mark = null;
   }
   if (session?.recovering && now >= session.recoverAt) restart();
-  if (session?.wonAt && now - session.wonAt > 620 && screen === "play") showResults();
+  if (session?.wonAt && now - session.wonAt > WIN_TO_RESULTS_MS && screen === "play") showResults();
 
   const drawing = session?.level ?? DEMO;
   const state = session?.state ?? demo;
@@ -636,6 +709,7 @@ function frame(now: number): void {
       debug,
       failDots: debug && session ? (save.stats[session.level.id]?.spots ?? []) : [],
       mark: session?.mark ?? null,
+      inset: session ? { top: 92, bottom: 104 } : { top: 0, bottom: 0 },
     },
     dt,
   );

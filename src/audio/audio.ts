@@ -67,9 +67,20 @@ export class Soundscape {
   }
 
   won(): void {
-    this.tone(523, 0.18, "sine", 0.06);
-    this.tone(659, 0.22, "sine", 0.045);
-    this.tone(784, 0.32, "triangle", 0.04);
+    // Rising arpeggio, then a held fifth.
+    this.tone(523, 0.16, "sine", 0.055);
+    this.tone(659, 0.16, "sine", 0.05, 0, 0.07);
+    this.tone(784, 0.18, "sine", 0.05, 0, 0.14);
+    this.tone(1047, 0.5, "triangle", 0.045, 0, 0.21);
+    this.tone(1568, 0.6, "sine", 0.02, 0, 0.21);
+  }
+
+  /** One objective medal landing on the results card. */
+  stamp(n: number): void {
+    const f = [784, 988, 1175, 1319][n % 4] ?? 784;
+    this.knock(260, 0.08, 0.12);
+    this.tone(f, 0.22, "triangle", 0.05);
+    this.tone(f * 2, 0.16, "sine", 0.018);
   }
 
   lost(): void {
@@ -89,9 +100,9 @@ export class Soundscape {
     this.tone(880, 0.1, "sine", 0.04);
   }
 
-  private tone(freq: number, dur: number, type: OscillatorType, gain: number, slide = 0): void {
+  private tone(freq: number, dur: number, type: OscillatorType, gain: number, slide = 0, delay = 0): void {
     if (!this.ctx || !this.master || this.volume <= 0.01) return;
-    const t = this.ctx.currentTime;
+    const t = this.ctx.currentTime + delay;
     const osc = this.ctx.createOscillator();
     const amp = this.ctx.createGain();
     osc.type = type;
