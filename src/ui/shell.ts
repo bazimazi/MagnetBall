@@ -1,4 +1,6 @@
 import type { Settings } from "../game/settings";
+import { CAMPAIGN } from "../game/levels";
+import { blueprint } from "./blueprint";
 
 export interface Handlers {
   act: (action: string, arg: string, node: HTMLElement) => void;
@@ -151,15 +153,19 @@ export class Shell {
     this.hud.innerHTML = "";
     this.paint(
       `<div class="scrim title-scrim">
+        <div class="title-topline"><span>LODESTONE INSTITUTE</span><span class="signal"><i></i> FIELD SYSTEM ONLINE</span></div>
         <div class="copy title-copy">
-          <div class="brand rise" style="--i:0">${EMBLEM}<p class="eyebrow">Lodestone Institute</p></div>
+          <div class="brand rise" style="--i:0">${EMBLEM}<p class="eyebrow">An experiment in attraction</p></div>
           <h1 class="rise" style="--i:1">Magnet<br/><span>Ball</span></h1>
-          <p class="lede rise" style="--i:2">You do not steer the probe. You change what the room does to it.</p>
+          <p class="lede rise" style="--i:2">A little polarity. A world of possibility.</p>
+          <p class="title-description rise" style="--i:2">Flip the field. Follow the momentum.<br/>Find your way through a sleeping magnetic institute.</p>
           <div class="rise" style="--i:3">
             <button class="btn primary big" data-act="enter">${ICON.play}<span>Enter the institute</span></button>
           </div>
           <p class="keys rise" style="--i:4"><kbd>Tap</kbd> or <kbd>Space</kbd> flip polarity <span class="sep">·</span> <kbd>R</kbd> restart <span class="sep">·</span> <kbd>Esc</kbd> pause</p>
         </div>
+        <div class="specimen-label" aria-hidden="true"><span>FIG. 01 / THE POLARITY ENGINE</span><span>Opposites attract. Possibilities unfold.</span></div>
+        <div class="title-footer"><span>A PHYSICS PUZZLE IN TWO POLARITIES</span><div class="pole-legend"><span class="north-mark">△ NORTH</span><i></i><span class="south-mark">○ SOUTH</span></div><span>OBSERVE · EXPERIMENT · DISCOVER</span></div>
       </div>`,
       true,
     );
@@ -195,6 +201,7 @@ export class Shell {
             : `<span class="meta dim">${ICON.lock} Clear more of the previous wing</span>`;
         const letter = wing.wing.replace(/^Wing\s+/i, "");
         return `<button class="plate rise ${locked ? "locked" : ""} ${done ? "done" : ""}" style="--i:${i + 2}" data-act="world" data-arg="${wing.id}" ${locked ? "disabled" : ""}>
+          ${blueprint(CAMPAIGN.find(level => level.world === wing.id))}
           <span class="badge">${esc(letter)}</span>
           <span class="plate-body">
             <span class="plate-name">${esc(wing.name)}</span>
@@ -247,6 +254,7 @@ export class Shell {
         const pips = level.pips.map((on) => `<i class="${on ? "on" : ""}"></i>`).join("");
         const state = !level.unlocked ? "locked" : level.cleared ? "cleared" : level.next ? "next" : "";
         return `<button class="node rise ${state}" style="--i:${i + 2}" data-act="level" data-arg="${esc(level.id)}" ${level.unlocked ? "" : "disabled"} aria-label="Room ${level.index}: ${esc(level.name)}${level.unlocked ? "" : " (locked)"}">
+          ${blueprint(CAMPAIGN.find(room => room.id === level.id))}
           <span class="idx">${level.unlocked ? level.index : ICON.lock}</span>
           <span class="node-name">${esc(level.name)}</span>
           <span class="pips">${pips}</span>

@@ -710,6 +710,8 @@ function frame(now: number): void {
       failDots: debug && session ? (save.stats[session.level.id]?.spots ?? []) : [],
       mark: session?.mark ?? null,
       inset: session ? { top: 92, bottom: 104 } : { top: 0, bottom: 0 },
+      title: screen === "title",
+      paused: document.hidden || screen === "pause" || screen === "settings",
     },
     dt,
   );

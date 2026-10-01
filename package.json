@@ -12,6 +12,7 @@
     "solve": "vitest run tests/solve.test.ts"
   },
   "devDependencies": {
+    "@napi-rs/canvas": "^1.0.9",
     "@types/node": "^26.6.2",
     "typescript": "^5.8.3",
     "vite": "^6.3.5",

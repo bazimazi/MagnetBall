@@ -2,6 +2,8 @@ import type { FailReason, LevelDef, Polarity, SimEvent, SimState } from "../core
 import { LEVEL_H, LEVEL_W } from "../physics/constants";
 import { cycledPolarity, faceFrame, laserActive, poseOf } from "../physics/geom";
 import type { Settings } from "../game/settings";
+import { mix, rgba } from "./color";
+import { drawObservatory } from "./observatory";
 
 type ParticleKind = "dot" | "spark" | "shard";
 
@@ -64,6 +66,8 @@ export interface FrameInput {
   mark: Mark | null;
   /** Screen pixels kept clear for the HUD above and below the chamber. */
   inset: { top: number; bottom: number };
+  title?: boolean;
+  paused?: boolean;
 }
 
 const NORTH = "#ff8f3f";
@@ -99,26 +103,6 @@ function easeOutBack(t: number): number {
 function easeInCubic(t: number): number {
   const u = Math.min(1, Math.max(0, t));
   return u * u * u;
-}
-
-function hexRgb(hex: string): [number, number, number] {
-  const v = parseInt(hex.slice(1), 16);
-  return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
-}
-
-function mix(a: string, b: string, t: number): string {
-  const [ar, ag, ab] = hexRgb(a);
-  const [br, bg, bb] = hexRgb(b);
-  const k = Math.min(1, Math.max(0, t));
-  const r = Math.round(ar + (br - ar) * k);
-  const g = Math.round(ag + (bg - ag) * k);
-  const bl = Math.round(ab + (bb - ab) * k);
-  return `rgb(${r},${g},${bl})`;
-}
-
-function rgba(hex: string, a: number): string {
-  const [r, g, b] = hexRgb(hex);
-  return `rgba(${r},${g},${b},${a})`;
 }
 
 const glowCache = new Map<string, HTMLCanvasElement>();
@@ -250,6 +234,10 @@ export class View {
     this.polMix = 1;
     this.lastPol = 0;
     this.hot.clear();
+    this.trauma = 0;
+    this.flash = 0;
+    this.trailTick = 0;
+    this.spin = 0;
   }
 
   ingest(events: SimEvent[], settings: Settings, level: LevelDef, state: SimState): void {
@@ -415,20 +403,22 @@ export class View {
   draw(input: FrameInput, dt: number): void {
     const { ctx } = this;
     const calm = input.settings.reducedMotion;
+    if (input.paused) dt = 0;
     this.clock += dt;
 
     this.step(dt, input);
 
     // Camera: ease toward the requested HUD inset, settle the intro zoom.
-    const k = 1 - Math.exp(-dt * 9);
+    const k = calm ? 1 : 1 - Math.exp(-dt * 9);
     this.inset.top += (input.inset.top - this.inset.top) * k;
     this.inset.bottom += (input.inset.bottom - this.inset.bottom) * k;
     this.zoom += (1 - this.zoom) * (1 - Math.exp(-dt * 4));
     const side = Math.min(28, this.cssW * 0.035);
     const availW = this.cssW - side * 2;
     const availH = this.cssH - this.inset.top - this.inset.bottom - 16;
-    const scale = Math.max(1, Math.min(availW / LEVEL_W, availH / LEVEL_H)) * this.zoom;
-    const shakeAmp = this.trauma * this.trauma * 9;
+    const baseScale = Math.max(1, Math.min(availW / LEVEL_W, availH / LEVEL_H));
+    const scale = baseScale * (calm ? 1 : this.zoom);
+    const shakeAmp = calm ? 0 : this.trauma * this.trauma * 9;
     const sx = (hash(Math.floor(this.clock * 60), 1) - 0.5) * 2 * shakeAmp;
     const sy = (hash(Math.floor(this.clock * 60), 2) - 0.5) * 2 * shakeAmp;
     const ox = (this.cssW - LEVEL_W * scale) / 2 + sx;
@@ -438,10 +428,18 @@ export class View {
     ctx.globalCompositeOperation = "source-over";
     ctx.globalAlpha = 1;
     this.backdrop();
+    if (input.title) {
+      drawObservatory(ctx, this.cssW, this.cssH, this.clock, calm);
+      this.post(true);
+      return;
+    }
     this.frame(ox, oy, scale);
 
     // Static layer: walls, pits, barbs, shields.
-    this.ensureCache(input.level, scale, input.settings.contrast);
+    // Cache at the final viewport size. Camera easing must not repaint the room each frame.
+    const targetH = this.cssH - input.inset.top - input.inset.bottom - 16;
+    const cacheScale = Math.max(1, Math.min(availW / LEVEL_W, targetH / LEVEL_H));
+    this.ensureCache(input.level, cacheScale, input.settings.contrast);
     const introK = easeOutCubic(this.intro);
     if (this.cache) {
       ctx.save();
@@ -454,6 +452,7 @@ export class View {
     ctx.translate(ox, oy);
     ctx.scale(scale, scale);
     ctx.globalAlpha = introK;
+    this.atmosphere(input);
     this.zones(input);
     this.fields(input);
     this.plates(input);
@@ -486,6 +485,13 @@ export class View {
   private step(dt: number, input: FrameInput): void {
     const { state, settings } = input;
     const ball = state.ball;
+    if (settings.reducedMotion) {
+      this.intro = 1;
+      this.spawn = 1;
+      this.zoom = 1;
+      this.flipPop = 0;
+      this.trauma = 0;
+    }
     this.squash = Math.max(0, this.squash - dt * 3.2);
     this.trauma = Math.max(0, this.trauma - dt * 2.2);
     this.flipPop = Math.max(0, this.flipPop - dt * 4);
@@ -513,7 +519,7 @@ export class View {
     // Rolling: arc length over radius, signed by direction of travel.
     if (state.status === "play") {
       const tangent = ball.onGround ? ball.vx : ball.vx * 0.6;
-      this.spin += (tangent / ball.radius) * dt;
+      if (!settings.reducedMotion) this.spin += (tangent / ball.radius) * dt;
     }
 
     for (const p of this.particles) {
@@ -533,14 +539,14 @@ export class View {
     }
     this.floats = this.floats.filter((f) => f.life > 0);
 
-    if (!settings.reducedMotion && state.status === "play") {
+    if (!settings.reducedMotion && state.status === "play" && dt > 0) {
       this.trailTick += dt;
       if (this.trailTick > 0.016) {
         this.trail.push({ x: ball.x, y: ball.y, p: pol });
-        if (this.trail.length > 26) this.trail.shift();
+        if (this.trail.length > (settings.particles === "reduced" ? 16 : 34)) this.trail.shift();
         this.trailTick = 0;
       }
-    } else if (this.trail.length) {
+    } else if (this.trail.length && dt > 0) {
       this.trail.shift();
     }
   }
@@ -559,11 +565,18 @@ export class View {
       this.cssH * 0.5,
       Math.max(this.cssW, this.cssH) * 0.75,
     );
-    sky.addColorStop(0, "#2a241d");
-    sky.addColorStop(0.55, "#16130f");
-    sky.addColorStop(1, "#0a0908");
+    sky.addColorStop(0, "#172d32");
+    sky.addColorStop(0.55, "#0b171d");
+    sky.addColorStop(1, "#050b10");
     ctx.fillStyle = sky;
     ctx.fillRect(0, 0, this.cssW, this.cssH);
+    // Architectural lines extend beyond the chamber into the surrounding institute.
+    ctx.strokeStyle = "rgba(133,180,182,0.035)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let x = 0; x < this.cssW; x += 64) { ctx.moveTo(x, 0); ctx.lineTo(x, this.cssH); }
+    for (let y = 0; y < this.cssH; y += 64) { ctx.moveTo(0, y); ctx.lineTo(this.cssW, y); }
+    ctx.stroke();
     if (this.noise) {
       ctx.save();
       ctx.globalAlpha = 0.16;
@@ -583,7 +596,7 @@ export class View {
     ctx.shadowColor = "rgba(0,0,0,0.6)";
     ctx.shadowBlur = 40;
     ctx.shadowOffsetY = 14;
-    ctx.fillStyle = "#1a1612";
+    ctx.fillStyle = "#122027";
     roundRect(ctx, ox - pad, oy - pad, w + pad * 2, h + pad * 2, pad * 1.2);
     ctx.fill();
     ctx.restore();
@@ -594,6 +607,10 @@ export class View {
     ctx.strokeStyle = edge;
     ctx.lineWidth = 1.2;
     roundRect(ctx, ox - pad + 0.5, oy - pad + 0.5, w + pad * 2 - 1, h + pad * 2 - 1, pad * 1.2);
+    ctx.stroke();
+    ctx.strokeStyle = "rgba(97,205,198,0.14)";
+    ctx.lineWidth = 1;
+    roundRect(ctx, ox - pad - 5, oy - pad - 5, w + pad * 2 + 10, h + pad * 2 + 10, pad * 1.4);
     ctx.stroke();
     const rivet = Math.max(1.5, pad * 0.32);
     ctx.fillStyle = "rgba(227,184,114,0.55)";
@@ -622,6 +639,29 @@ export class View {
     g.setTransform(this.dpr * scale, 0, 0, this.dpr * scale, 0, 0);
     paintStatic(g, level, contrast);
     this.cache = c;
+  }
+
+  private atmosphere(input: FrameInput): void {
+    const { ctx } = this;
+    const t = input.settings.reducedMotion ? 0 : this.clock;
+    const count = input.settings.particles === "reduced" || input.settings.reducedMotion ? 10 : 42;
+    ctx.save();
+    ctx.beginPath(); ctx.rect(0, 0, LEVEL_W, LEVEL_H); ctx.clip();
+    ctx.globalCompositeOperation = "lighter";
+    for (let i = 0; i < count; i++) {
+      const x = frac(hash(i, 21) + t * (0.001 + hash(i, 23) * 0.0015)) * LEVEL_W;
+      const y = frac(hash(i, 22) - t * 0.003) * LEVEL_H;
+      const alpha = 0.05 + Math.pow(Math.sin(t * 0.5 + i * 2), 2) * 0.12;
+      ctx.fillStyle = rgba(i % 3 ? IVORY : SOUTH, alpha);
+      ctx.beginPath(); ctx.arc(x, y, 0.012 + hash(i, 24) * 0.025, 0, Math.PI * 2); ctx.fill();
+    }
+    // Colored light pools anchor the probe to the chamber's back wall.
+    const b = input.state.ball;
+    if (input.state.status === "play") {
+      ctx.globalAlpha = 0.13;
+      ctx.drawImage(glowSprite(pole(input.state.effective || b.polarity)), b.x - 2, b.y - 2, 4, 4);
+    }
+    ctx.restore();
   }
 
   private zones(input: FrameInput): void {
@@ -706,7 +746,24 @@ export class View {
       ctx.restore();
 
       const len = Math.hypot(face.bx - face.ax, face.by - face.ay);
-      const count = Math.max(6, Math.min(44, Math.round(len * 3)));
+      // Curved flux contours make the extent and direction of a field legible at a glance.
+      ctx.save();
+      ctx.lineWidth = 0.018;
+      ctx.strokeStyle = rgba(color, 0.07 + warm * 0.08);
+      for (let j = 0; j < 5; j++) {
+        const u = (j + 0.5) / 5;
+        const x = face.ax + (face.bx - face.ax) * u;
+        const y = face.ay + (face.by - face.ay) * u;
+        const bend = (u - 0.5) * reach * 0.25;
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.bezierCurveTo(x + face.nx * reach * 0.3, y + face.ny * reach * 0.3,
+          x + face.nx * reach * 0.7 - face.ny * bend, y + face.ny * reach * 0.7 + face.nx * bend,
+          x + face.nx * reach - face.ny * bend, y + face.ny * reach + face.nx * bend);
+        ctx.stroke();
+      }
+      ctx.restore();
+      const count = Math.max(6, Math.min(settings.particles === "reduced" ? 12 : 44, Math.round(len * 3)));
       const speed = 0.32 + warm * 0.4;
       ctx.save();
       ctx.globalCompositeOperation = "lighter";
@@ -769,7 +826,7 @@ export class View {
       ctx.globalCompositeOperation = "lighter";
       ctx.lineCap = "round";
       ctx.lineWidth = settings.contrast ? 0.07 : 0.05;
-      const n = 22;
+      const n = settings.particles === "reduced" ? 8 : 22;
       for (let i = 0; i < n; i++) {
         const seed = oi * 131 + i;
         const a = ((i + hash(seed, 1) * 0.5) / n) * Math.PI * 2 + t * 0.08;
@@ -1016,9 +1073,10 @@ export class View {
       ctx.arc(pose.x + 0.08, pose.y + 0.12, r, 0, Math.PI * 2);
       ctx.fill();
       const grad = ctx.createRadialGradient(pose.x - r * 0.35, pose.y - r * 0.4, r * 0.05, pose.x, pose.y, r);
-      grad.addColorStop(0, "#8a7f70");
-      grad.addColorStop(0.5, "#4a4238");
-      grad.addColorStop(1, "#1d1a15");
+      grad.addColorStop(0, "#adcac4");
+      grad.addColorStop(0.4, "#415d67");
+      grad.addColorStop(0.85, "#14242f");
+      grad.addColorStop(1, "#617c7b");
       ctx.fillStyle = grad;
       ctx.beginPath();
       ctx.arc(pose.x, pose.y, r, 0, Math.PI * 2);
@@ -1034,6 +1092,16 @@ export class View {
         ctx.arc(pose.x, pose.y, r - 0.02, a0, a0 + 1.5);
         ctx.stroke();
       }
+      // A second, counter-rotating induction collar distinguishes a source from the probe.
+      ctx.strokeStyle = rgba(color, 0.35 + warm * 0.3);
+      ctx.lineWidth = 0.022;
+      for (let k = 0; k < 4; k++) {
+        const a = -rot * 0.65 + k * Math.PI / 2;
+        ctx.beginPath(); ctx.arc(pose.x, pose.y, r * 1.32, a, a + 0.8); ctx.stroke();
+      }
+      ctx.strokeStyle = rgba(IVORY, 0.2);
+      ctx.lineWidth = 0.025;
+      ctx.beginPath(); ctx.arc(pose.x, pose.y, r * 0.65, 0, Math.PI * 2); ctx.stroke();
       ctx.restore();
       glyph(ctx, pol, pose.x, pose.y, r * 0.42, false);
     }
@@ -1087,6 +1155,9 @@ export class View {
       grad.addColorStop(1, "#8a6230");
       ctx.fillStyle = grad;
       ctx.fill();
+      ctx.fillStyle = "rgba(255,253,233,0.32)";
+      ctx.beginPath(); ctx.moveTo(0, -0.24); ctx.lineTo(0, 0.24); ctx.lineTo(-0.17, 0); ctx.closePath(); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(0, -0.24); ctx.lineTo(0.17, 0); ctx.lineTo(0, 0.24); ctx.lineTo(-0.17, 0); ctx.closePath();
       ctx.strokeStyle = "rgba(255,244,216,0.8)";
       ctx.lineWidth = 0.025;
       ctx.stroke();
@@ -1147,6 +1218,16 @@ export class View {
     ctx.fill();
 
     ctx.lineCap = "round";
+    // A stationary precision collar surrounds the rotating capture iris.
+    ctx.strokeStyle = rgba(color, 0.25);
+    ctx.lineWidth = 0.025;
+    ctx.beginPath(); ctx.arc(goal.x, goal.y, R * 1.32, 0, Math.PI * 2); ctx.stroke();
+    for (let j = 0; j < 16; j++) {
+      const a = j / 16 * Math.PI * 2;
+      const inner = R * (j % 4 === 0 ? 1.17 : 1.25);
+      line(ctx, goal.x + Math.cos(a) * inner, goal.y + Math.sin(a) * inner,
+        goal.x + Math.cos(a) * R * 1.32, goal.y + Math.sin(a) * R * 1.32);
+    }
     const spinRate = 1 + near * 1.5 + flare * 6;
     for (let k = 0; k < 3; k++) {
       const a0 = t * spinRate + (k * Math.PI * 2) / 3;
@@ -1330,18 +1411,38 @@ export class View {
     const r = input.state.ball.radius;
     ctx.save();
     ctx.globalCompositeOperation = "lighter";
-    ctx.lineCap = "round";
     const n = this.trail.length;
-    for (let i = 1; i < n; i++) {
-      const a = this.trail[i - 1];
-      const b = this.trail[i];
-      if (!a || !b) continue;
-      const k = i / n;
-      ctx.strokeStyle = pole(b.p as -1 | 1);
-      ctx.globalAlpha = k * k * 0.4;
-      ctx.lineWidth = r * 1.5 * k;
-      line(ctx, a.x, a.y, b.x, b.y);
+    const first = this.trail[0], last = this.trail[n - 1];
+    if (Math.hypot(last.x - first.x, last.y - first.y) < 0.02) { ctx.restore(); return; }
+    const ribbon = ctx.createLinearGradient(first.x, first.y, last.x, last.y);
+    for (let i = 0; i < n; i++) {
+      const k = i / (n - 1);
+      ribbon.addColorStop(k, rgba(pole(this.trail[i].p as -1 | 1), k * k * 0.55));
     }
+    ctx.fillStyle = ribbon;
+    // One tapered silhouette avoids additive beads where individual round strokes overlap.
+    ctx.beginPath();
+    for (const side of [1, -1]) {
+      for (let j = 0; j < n; j++) {
+        const i = side === 1 ? j : n - 1 - j;
+        const p = this.trail[i];
+        const before = this.trail[Math.max(0, i - 1)], after = this.trail[Math.min(n - 1, i + 1)];
+        const length = Math.max(0.001, Math.hypot(after.x - before.x, after.y - before.y));
+        const width = r * 0.7 * i / (n - 1) * side;
+        const x = p.x - (after.y - before.y) / length * width;
+        const y = p.y + (after.x - before.x) / length * width;
+        if (side === 1 && j === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+    }
+    ctx.closePath(); ctx.fill();
+    const core = ctx.createLinearGradient(first.x, first.y, last.x, last.y);
+    core.addColorStop(0, rgba(IVORY, 0)); core.addColorStop(1, rgba(IVORY, 0.55));
+    ctx.strokeStyle = core;
+    ctx.lineWidth = r * 0.12;
+    ctx.lineJoin = "round";
+    ctx.beginPath(); ctx.moveTo(first.x, first.y);
+    for (let i = 1; i < n; i++) ctx.lineTo(this.trail[i].x, this.trail[i].y);
+    ctx.stroke();
     ctx.restore();
   }
 
@@ -1358,7 +1459,7 @@ export class View {
     let size = 1;
     let spin = this.spin;
     if (this.winT >= 0) {
-      const k = Math.min(1, this.winT / 0.55);
+      const k = calm ? 1 : Math.min(1, this.winT / 0.55);
       const e = easeInCubic(k);
       x = b.x + (level.goal.x - b.x) * easeOutCubic(k);
       y = b.y + (level.goal.y - b.y) * easeOutCubic(k);
@@ -1367,7 +1468,7 @@ export class View {
       if (size <= 0.01) return;
     }
     const appear = easeOutBack(this.spawn);
-    size *= appear * (1 + this.flipPop * 0.22);
+    size *= appear * (1 + (calm ? 0 : this.flipPop * 0.22));
     const r = b.radius * size;
     const color = this.currentPoleColor();
     const pol = state.effective || b.polarity;
@@ -1421,13 +1522,17 @@ export class View {
 
     const body = ctx.createRadialGradient(-r * 0.35, -r * 0.4, r * 0.08, 0, 0, r);
     body.addColorStop(0, "#fffaf0");
-    body.addColorStop(0.35, "#cdbfa8");
-    body.addColorStop(0.8, "#5a4f42");
-    body.addColorStop(1, "#27221c");
+    body.addColorStop(0.35, "#d2e3db");
+    body.addColorStop(0.72, "#4a6870");
+    body.addColorStop(0.91, "#172c38");
+    body.addColorStop(1, "#8db6b1");
     ctx.fillStyle = body;
     ctx.beginPath();
     ctx.arc(0, 0, r, 0, Math.PI * 2);
     ctx.fill();
+    ctx.strokeStyle = rgba(pole(pol), 0.8);
+    ctx.lineWidth = r * 0.035;
+    ctx.stroke();
 
     // Rolling notches: the ring turns, the glyph stays upright.
     ctx.save();
@@ -1444,7 +1549,7 @@ export class View {
     ctx.restore();
 
     const core = ctx.createRadialGradient(0, -r * 0.1, 0, 0, 0, r * 0.56);
-    core.addColorStop(0, mix(color.startsWith("#") ? color : pole(pol), IVORY, 0.35));
+    core.addColorStop(0, mix(color, IVORY, 0.55));
     core.addColorStop(1, color);
     ctx.fillStyle = core;
     ctx.beginPath();
@@ -1531,14 +1636,38 @@ export class View {
 
 function paintStatic(g: CanvasRenderingContext2D, level: LevelDef, contrast: boolean): void {
   const back = g.createLinearGradient(0, 0, 0, LEVEL_H);
-  back.addColorStop(0, "#231e18");
-  back.addColorStop(1, "#171410");
+  const palettes = [["#132c32", "#0a171e"], ["#1b2439", "#0d1523"], ["#2d2931", "#171b25"]];
+  const palette = palettes[Math.max(0, level.world - 1) % palettes.length];
+  back.addColorStop(0, palette[0]);
+  back.addColorStop(1, palette[1]);
   g.fillStyle = back;
   g.fillRect(0, 0, LEVEL_W, LEVEL_H);
 
+  // Recessed architectural panels and a large engraved induction dial.
+  g.save();
+  g.strokeStyle = "rgba(122,181,187,0.065)";
+  g.lineWidth = 0.025;
+  for (let y = 0.4; y < LEVEL_H; y += 3) {
+    for (let x = 0.4; x < LEVEL_W; x += 4) {
+      g.strokeRect(x, y, 3.75, 2.75);
+      g.fillStyle = "rgba(157,198,192,0.12)";
+      g.fillRect(x + 0.12, y + 0.12, 0.07, 0.07);
+    }
+  }
+  g.translate(LEVEL_W / 2, LEVEL_H / 2);
+  for (const r of [3.1, 3.25, 4.6, 4.72]) {
+    g.beginPath(); g.arc(0, 0, r, 0, Math.PI * 2); g.stroke();
+  }
+  for (let i = 0; i < 64; i++) {
+    const a = i / 64 * Math.PI * 2;
+    const r = i % 8 === 0 ? 4.35 : 4.53;
+    line(g, Math.cos(a) * r, Math.sin(a) * r, Math.cos(a) * 4.65, Math.sin(a) * 4.65);
+  }
+  g.restore();
+
   // Drafting grid on the back wall.
   g.lineWidth = 0.015;
-  g.strokeStyle = "rgba(227,184,114,0.05)";
+  g.strokeStyle = "rgba(145,199,199,0.035)";
   g.beginPath();
   for (let x = 1; x < LEVEL_W; x++) {
     g.moveTo(x, 0);
@@ -1549,7 +1678,7 @@ function paintStatic(g: CanvasRenderingContext2D, level: LevelDef, contrast: boo
     g.lineTo(LEVEL_W, y);
   }
   g.stroke();
-  g.strokeStyle = "rgba(227,184,114,0.09)";
+  g.strokeStyle = "rgba(145,199,199,0.045)";
   g.lineWidth = 0.025;
   g.beginPath();
   for (let x = 5; x < LEVEL_W; x += 5) {
@@ -1563,10 +1692,22 @@ function paintStatic(g: CanvasRenderingContext2D, level: LevelDef, contrast: boo
   g.stroke();
 
   const glow = g.createRadialGradient(LEVEL_W / 2, LEVEL_H * 0.35, 1, LEVEL_W / 2, LEVEL_H * 0.4, LEVEL_W * 0.6);
-  glow.addColorStop(0, "rgba(255,220,170,0.06)");
+  glow.addColorStop(0, "rgba(103,213,201,0.07)");
   glow.addColorStop(1, "rgba(0,0,0,0.25)");
   g.fillStyle = glow;
   g.fillRect(0, 0, LEVEL_W, LEVEL_H);
+
+  // Ceiling light and a faint shaft of light remain behind all collision surfaces.
+  const light = g.createLinearGradient(0, 0, 0, 6);
+  light.addColorStop(0, "rgba(188,230,215,0.07)");
+  light.addColorStop(1, "rgba(188,230,215,0)");
+  g.fillStyle = light;
+  g.beginPath(); g.moveTo(7, 0); g.lineTo(13, 0); g.lineTo(17, 7); g.lineTo(3, 7); g.closePath(); g.fill();
+  g.fillStyle = "rgba(203,239,225,0.5)";
+  g.fillRect(7.5, 0.03, 5, 0.035);
+  g.font = "0.16px monospace";
+  g.fillStyle = "rgba(180,205,196,0.27)";
+  g.fillText(`LODESTONE / ${level.id.toUpperCase()}`, 0.35, 0.35);
 
   for (const pit of level.voids ?? []) {
     const grad = g.createLinearGradient(0, pit.y, 0, pit.y + pit.h);
@@ -1658,9 +1799,9 @@ function paintStatic(g: CanvasRenderingContext2D, level: LevelDef, contrast: boo
 /** Bevelled brass-and-iron slab. */
 function metal(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, bright = false): void {
   const grad = ctx.createLinearGradient(0, y, 0, y + h);
-  grad.addColorStop(0, "#5f5548");
-  grad.addColorStop(Math.min(0.5, 0.35 / Math.max(0.35, h)), "#4a4237");
-  grad.addColorStop(1, "#2f2922");
+  grad.addColorStop(0, "#65777a");
+  grad.addColorStop(Math.min(0.5, 0.35 / Math.max(0.35, h)), "#33464d");
+  grad.addColorStop(1, "#182830");
   ctx.fillStyle = grad;
   ctx.fillRect(x, y, w, h);
   ctx.strokeStyle = bright ? "rgba(227,184,114,0.7)" : "rgba(227,184,114,0.45)";
@@ -1672,6 +1813,15 @@ function metal(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h
   ctx.moveTo(x + 0.04, y + 0.05);
   ctx.lineTo(x + w - 0.04, y + 0.05);
   ctx.stroke();
+  ctx.fillStyle = "rgba(0,0,0,0.25)";
+  ctx.fillRect(x + 0.05, y + h - Math.min(0.12, h * 0.25), w - 0.1, Math.min(0.1, h * 0.2));
+  if (w > 1 && h > 0.6) {
+    ctx.strokeStyle = "rgba(6,17,24,0.35)";
+    ctx.lineWidth = 0.025;
+    for (let xx = x + 1; xx < x + w - 0.2; xx += 1.6) line(ctx, xx, y + 0.14, xx, y + h - 0.14);
+    ctx.strokeStyle = "rgba(166,198,188,0.13)";
+    ctx.strokeRect(x + 0.13, y + 0.13, w - 0.26, h - 0.26);
+  }
   if (w > 1.2 && h > 1.2) {
     ctx.fillStyle = "rgba(227,184,114,0.35)";
     for (const [rx, ry] of [

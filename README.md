@@ -21,6 +21,25 @@ The first three wings are hand-authored. Later wings are visible and still dark:
 - `npm run solve` searches for those solutions again after a physics or layout change.
 - `npm run build` typechecks and builds.
 
+## Visuals
+
+The institute has a procedural kinetic title sculpture, distinct chamber palettes,
+machined panels, animated magnetic flux, a tapered probe trail, and a capture iris.
+Room selection shows blueprints generated from the actual level geometry. All art
+is drawn in Canvas or SVG, with no image downloads or additional runtime dependencies.
+
+Reduced motion keeps decorative fields and the title sculpture still. Pausing also
+freezes visual effects. The chamber texture is cached independently of camera easing.
+
+`npm test` includes real Canvas rendering checks for every layout, entry caching,
+interrupted color blends, pause, reduced motion, capture, and failure. To also save
+review PNGs in PowerShell:
+
+```powershell
+$env:RENDER_ARTIFACTS = 'artifacts/visual-review'
+npx vitest run tests/render.test.ts
+```
+
 ## Layout
 
 - `src/physics` — fixed-step deterministic simulation
